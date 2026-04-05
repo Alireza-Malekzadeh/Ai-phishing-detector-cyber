@@ -1,192 +1,230 @@
 """
-URL Feature Extractor
-Extracts handcrafted features from a URL for phishing detection.
+Email Feature Extractor
+Extracts features from raw email content for phishing detection.
 """
 
 import re
-import urllib.parse
-import tldextract
-from dataclasses import dataclass, field
+import email
+from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import urlparse
 
 
-# Common shortening services
-SHORTENING_SERVICES = {
-    "bit.ly", "tinyurl.com", "goo.gl", "ow.ly", "t.co",
-    "is.gd", "buff.ly", "rebrand.ly", "cutt.ly", "short.io"
-}
+URGENCY_KEYWORDS = [
+    "urgent", "immediately", "account suspended", "verify now",
+    "limited time", "act now", "click here", "confirm your",
+    "unusual activity", "security alert", "your account will be",
+    "expires", "24 hours", "48 hours", "respond immediately",
+    "failure to", "violation", "suspended", "blocked", "restricted"
+]
 
-SUSPICIOUS_KEYWORDS = [
-    "login", "signin", "verify", "update", "secure", "account",
-    "banking", "confirm", "password", "credential", "paypal",
-    "amazon", "apple", "microsoft", "google", "ebay"
+SENSITIVE_KEYWORDS = [
+    "password", "credit card", "social security", "ssn", "bank account",
+    "pin", "cvv", "routing number", "login credentials", "username"
+]
+
+TRUSTED_BRANDS = [
+    "paypal", "amazon", "apple", "microsoft", "google", "netflix",
+    "facebook", "instagram", "ebay", "chase", "bank of america",
+    "wells fargo", "citibank", "irs", "fedex", "ups", "dhl"
 ]
 
 
 @dataclass
-class URLFeatures:
-    # Length-based
-    url_length: int = 0
-    domain_length: int = 0
-    path_length: int = 0
+class EmailFeatures:
+    # Structural
+    has_html: bool = False
+    num_links: int = 0
+    num_images: int = 0
+    body_length: int = 0
+    num_recipients: int = 0
 
-    # Character-based
-    num_dots: int = 0
-    num_hyphens: int = 0
-    num_underscores: int = 0
-    num_slashes: int = 0
-    num_at_symbols: int = 0
-    num_question_marks: int = 0
-    num_ampersands: int = 0
-    num_digits_in_url: int = 0
-    num_special_chars: int = 0
+    # Header signals
+    has_reply_to_mismatch: bool = False
+    sender_domain_in_body: bool = False
+    has_suspicious_subject: bool = False
 
-    # Domain-based
-    subdomain_count: int = 0
-    has_ip_address: bool = False
-    is_shortened: bool = False
-    tld_in_path: bool = False
+    # Content signals
+    num_urgency_keywords: int = 0
+    num_sensitive_keywords: int = 0
+    num_brand_impersonation: int = 0
+    link_to_text_ratio: float = 0.0
+    num_external_links: int = 0
+    num_mismatched_links: int = 0  # display text != actual URL
 
-    # Security
-    uses_https: bool = False
-    has_port: bool = False
-
-    # Suspicion signals
-    num_suspicious_keywords: int = 0
-    has_double_slash_redirect: bool = False
-    num_subdomains: int = 0
+    # Obfuscation signals
+    has_ip_links: bool = False
+    has_shortened_links: bool = False
+    num_exclamation_marks: int = 0
+    num_capital_runs: int = 0  # sequences of ALL CAPS words
 
     def to_list(self) -> list:
-        """Convert features to a flat list for ML models."""
         return [
-            self.url_length,
-            self.domain_length,
-            self.path_length,
-            self.num_dots,
-            self.num_hyphens,
-            self.num_underscores,
-            self.num_slashes,
-            self.num_at_symbols,
-            self.num_question_marks,
-            self.num_ampersands,
-            self.num_digits_in_url,
-            self.num_special_chars,
-            self.subdomain_count,
-            int(self.has_ip_address),
-            int(self.is_shortened),
-            int(self.tld_in_path),
-            int(self.uses_https),
-            int(self.has_port),
-            self.num_suspicious_keywords,
-            int(self.has_double_slash_redirect),
-            self.num_subdomains,
+            int(self.has_html),
+            self.num_links,
+            self.num_images,
+            self.body_length,
+            self.num_recipients,
+            int(self.has_reply_to_mismatch),
+            int(self.sender_domain_in_body),
+            int(self.has_suspicious_subject),
+            self.num_urgency_keywords,
+            self.num_sensitive_keywords,
+            self.num_brand_impersonation,
+            self.link_to_text_ratio,
+            self.num_external_links,
+            self.num_mismatched_links,
+            int(self.has_ip_links),
+            int(self.has_shortened_links),
+            self.num_exclamation_marks,
+            self.num_capital_runs,
         ]
 
     @staticmethod
     def feature_names() -> list:
         return [
-            "url_length", "domain_length", "path_length",
-            "num_dots", "num_hyphens", "num_underscores",
-            "num_slashes", "num_at_symbols", "num_question_marks",
-            "num_ampersands", "num_digits_in_url", "num_special_chars",
-            "subdomain_count", "has_ip_address", "is_shortened",
-            "tld_in_path", "uses_https", "has_port",
-            "num_suspicious_keywords", "has_double_slash_redirect",
-            "num_subdomains",
+            "has_html", "num_links", "num_images", "body_length",
+            "num_recipients", "has_reply_to_mismatch", "sender_domain_in_body",
+            "has_suspicious_subject", "num_urgency_keywords", "num_sensitive_keywords",
+            "num_brand_impersonation", "link_to_text_ratio", "num_external_links",
+            "num_mismatched_links", "has_ip_links", "has_shortened_links",
+            "num_exclamation_marks", "num_capital_runs",
         ]
 
 
-def _is_ip_address(hostname: str) -> bool:
-    """Check if hostname is an IP address."""
-    ip_pattern = re.compile(
-        r"^(\d{1,3}\.){3}\d{1,3}$"
-    )
-    return bool(ip_pattern.match(hostname))
+SHORTENING_SERVICES = {
+    "bit.ly", "tinyurl.com", "goo.gl", "ow.ly", "t.co",
+    "is.gd", "buff.ly", "rebrand.ly", "cutt.ly"
+}
+
+IP_PATTERN = re.compile(r"https?://(\d{1,3}\.){3}\d{1,3}")
+HREF_PATTERN = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
+IMG_PATTERN = re.compile(r"<img", re.IGNORECASE)
+CAPS_PATTERN = re.compile(r"\b[A-Z]{3,}\b")
 
 
-def extract_features(url: str) -> URLFeatures:
+def extract_features(raw_email: str) -> EmailFeatures:
     """
-    Extract all phishing-relevant features from a URL.
+    Extract phishing features from a raw email string.
 
     Args:
-        url: Raw URL string (with or without scheme)
+        raw_email: Full raw email content (headers + body)
 
     Returns:
-        URLFeatures dataclass populated with extracted values
+        EmailFeatures dataclass
     """
-    features = URLFeatures()
+    features = EmailFeatures()
+    msg = email.message_from_string(raw_email)
 
-    # Normalize: ensure scheme present for parsing
-    if not url.startswith(("http://", "https://")):
-        url_to_parse = "http://" + url
+    # --- Headers ---
+    sender = msg.get("From", "")
+    reply_to = msg.get("Reply-To", "")
+    subject = msg.get("Subject", "").lower()
+    to_field = msg.get("To", "")
+
+    features.num_recipients = len(to_field.split(","))
+
+    # Reply-To mismatch: sender domain != reply-to domain
+    def _get_domain(addr: str) -> str:
+        match = re.search(r"@([\w.\-]+)", addr)
+        return match.group(1).lower() if match else ""
+
+    sender_domain = _get_domain(sender)
+    reply_domain = _get_domain(reply_to)
+    if reply_to and sender_domain and reply_domain:
+        features.has_reply_to_mismatch = sender_domain != reply_domain
+
+    features.has_suspicious_subject = any(
+        kw in subject for kw in URGENCY_KEYWORDS
+    )
+
+    # --- Body ---
+    body = ""
+    html_body = ""
+
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            try:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    decoded = payload.decode("utf-8", errors="ignore")
+                    if ct == "text/plain":
+                        body += decoded
+                    elif ct == "text/html":
+                        html_body += decoded
+                        features.has_html = True
+            except Exception:
+                continue
     else:
-        url_to_parse = url
+        payload = msg.get_payload(decode=True)
+        if payload:
+            body = payload.decode("utf-8", errors="ignore")
+            if "<html" in body.lower():
+                features.has_html = True
+                html_body = body
 
-    parsed = urllib.parse.urlparse(url_to_parse)
-    extracted = tldextract.extract(url_to_parse)
+    full_text = (body + " " + html_body).lower()
+    features.body_length = len(full_text)
 
-    # --- Length features ---
-    features.url_length = len(url)
-    features.domain_length = len(parsed.netloc)
-    features.path_length = len(parsed.path)
+    # --- Link analysis ---
+    links = HREF_PATTERN.findall(html_body)
+    features.num_links = len(links)
+    features.num_images = len(IMG_PATTERN.findall(html_body))
 
-    # --- Character counts ---
-    features.num_dots = url.count(".")
-    features.num_hyphens = url.count("-")
-    features.num_underscores = url.count("_")
-    features.num_slashes = url.count("/")
-    features.num_at_symbols = url.count("@")
-    features.num_question_marks = url.count("?")
-    features.num_ampersands = url.count("&")
-    features.num_digits_in_url = sum(c.isdigit() for c in url)
-    features.num_special_chars = sum(
-        c in "!@#$%^&*()+=[]{}|;:,<>?" for c in url
-    )
+    word_count = len(full_text.split())
+    features.link_to_text_ratio = features.num_links / max(word_count, 1)
 
-    # --- Domain features ---
-    subdomain = extracted.subdomain
-    features.subdomain_count = len(subdomain.split(".")) if subdomain else 0
-    features.num_subdomains = features.subdomain_count
+    for link in links:
+        try:
+            parsed = urlparse(link)
+            domain = parsed.netloc.lower()
 
-    hostname = parsed.hostname or ""
-    features.has_ip_address = _is_ip_address(hostname)
+            if IP_PATTERN.match(link):
+                features.has_ip_links = True
 
-    domain_root = extracted.registered_domain
-    features.is_shortened = domain_root in SHORTENING_SERVICES
+            if any(s in domain for s in SHORTENING_SERVICES):
+                features.has_shortened_links = True
 
-    # Check if a known TLD appears in the path (e.g. /paypal.com/login)
-    features.tld_in_path = bool(
-        re.search(r"\.(com|org|net|gov|edu|co)", parsed.path)
-    )
+            if parsed.scheme in ("http", "https") and sender_domain:
+                if sender_domain not in domain:
+                    features.num_external_links += 1
+        except Exception:
+            continue
 
-    # --- Security features ---
-    features.uses_https = url_to_parse.startswith("https://")
-    features.has_port = bool(parsed.port)
+    # --- Sender domain in body (legit emails usually match) ---
+    if sender_domain and sender_domain in full_text:
+        features.sender_domain_in_body = True
 
-    # --- Suspicion signals ---
-    url_lower = url.lower()
-    features.num_suspicious_keywords = sum(
-        kw in url_lower for kw in SUSPICIOUS_KEYWORDS
-    )
-    features.has_double_slash_redirect = "//" in parsed.path
+    # --- Content signals ---
+    features.num_urgency_keywords = sum(kw in full_text for kw in URGENCY_KEYWORDS)
+    features.num_sensitive_keywords = sum(kw in full_text for kw in SENSITIVE_KEYWORDS)
+    features.num_brand_impersonation = sum(b in full_text for b in TRUSTED_BRANDS)
+
+    # --- Obfuscation signals ---
+    features.num_exclamation_marks = full_text.count("!")
+    features.num_capital_runs = len(CAPS_PATTERN.findall(body + " " + html_body))
 
     return features
 
 
 if __name__ == "__main__":
-    # Quick sanity check
-    test_urls = [
-        "https://www.google.com/search?q=hello",
-        "http://paypa1-secure-login.verify-account.com/signin",
-        "http://192.168.1.1/admin/login.php",
-        "https://bit.ly/3xAbc12",
-    ]
+    sample = """From: security@paypa1-alerts.com
+Reply-To: collect@phisher.ru
+To: victim@gmail.com
+Subject: URGENT: Your account has been suspended!
 
-    print(f"{'URL':<55} | {'HTTPS':<6} | {'IP':<5} | {'Keywords':<8} | {'Len'}")
-    print("-" * 90)
-    for u in test_urls:
-        f = extract_features(u)
-        print(
-            f"{u[:54]:<55} | {str(f.uses_https):<6} | "
-            f"{str(f.has_ip_address):<5} | {f.num_suspicious_keywords:<8} | {f.url_length}"
-        )
+Dear Customer,
+
+Your PayPal account has been SUSPENDED due to unusual activity.
+Click here immediately to verify your credentials: http://192.168.1.100/paypal/login
+
+Failure to verify within 24 hours will result in permanent account closure.
+
+PayPal Security Team
+"""
+    f = extract_features(sample)
+    print("Email Feature Extraction Demo")
+    print("=" * 40)
+    for name, val in zip(EmailFeatures.feature_names(), f.to_list()):
+        print(f"  {name:<30} {val}")

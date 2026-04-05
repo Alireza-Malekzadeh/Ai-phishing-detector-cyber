@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Large data files
+data/raw/
+data/processed/
+
+# Trained models (too large for GitHub)
+models/*.joblib
+models/*.pkl
+models/*.h5
+models/*.pt
+
+# MLflow
+mlruns/
+mlartifacts/
+
+# PyCharm
+.idea/
+
+# Mac
+.DS_Store
+
+# Environment variables
+.env

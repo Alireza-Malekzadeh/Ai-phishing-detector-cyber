@@ -19,9 +19,11 @@ SHORTENING_SERVICES = {
 SUSPICIOUS_KEYWORDS = [
     "login", "signin", "verify", "update", "secure", "account",
     "banking", "confirm", "password", "credential", "paypal",
-    "amazon", "apple", "microsoft", "google", "ebay"
+    "amazon", "apple", "microsoft", "google", "ebay",
+    "bank", "wallet", "payment", "checkout", "support",
+    "alert", "suspended", "unlock", "recover", "validation",
+    "authenticate", "authorize", "cardverify", "unusual"
 ]
-
 
 @dataclass
 class URLFeatures:
